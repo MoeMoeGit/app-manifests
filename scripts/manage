@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Validate and update application manifests without third-party packages."""
+
+import argparse
+import json
+import re
+import sys
+import tempfile
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent.parent
+APPS_DIR = ROOT / "apps"
+APP_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+CODE_PATTERN = re.compile(r"^[A-F0-9]{64}$")
+REQUIRED_KEYS = {"schema", "revision", "app", "updated_at", "devices"}
+CHINA_TIME = timezone(timedelta(hours=8))
+
+
+class ManifestError(ValueError):
+    pass
+
+
+def object_without_duplicates(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ManifestError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result
+
+
+def manifest_path(app):
+    if not APP_PATTERN.fullmatch(app):
+        raise ManifestError(f"invalid app id: {app}")
+    return APPS_DIR / app / "manifest-v1.json"
+
+
+def parse_date(value):
+    if not isinstance(value, str):
+        raise ManifestError("expiry must be a YYYY-MM-DD string")
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise ManifestError(f"invalid expiry date: {value}") from error
+    if parsed.isoformat() != value:
+        raise ManifestError(f"expiry must use YYYY-MM-DD: {value}")
+    return parsed
+
+
+def normalize_code(value):
+    code = value.strip().upper()
+    if not CODE_PATTERN.fullmatch(code):
+        raise ManifestError("device code must contain exactly 64 hexadecimal characters")
+    return code
+
+
+def load(path):
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            return json.load(handle, object_pairs_hook=object_without_duplicates)
+    except FileNotFoundError as error:
+        raise ManifestError(f"manifest does not exist: {path.relative_to(ROOT)}") from error
+    except json.JSONDecodeError as error:
+        raise ManifestError(f"invalid JSON in {path.relative_to(ROOT)}: {error}") from error
+
+
+def validate(path, manifest):
+    relative = path.relative_to(ROOT)
+    if not isinstance(manifest, dict):
+        raise ManifestError(f"{relative}: top-level value must be an object")
+    keys = set(manifest)
+    if keys != REQUIRED_KEYS:
+        missing = sorted(REQUIRED_KEYS - keys)
+        extra = sorted(keys - REQUIRED_KEYS)
+        raise ManifestError(f"{relative}: invalid keys; missing={missing}, extra={extra}")
+    if manifest["schema"] != 1:
+        raise ManifestError(f"{relative}: schema must be 1")
+    revision = manifest["revision"]
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ManifestError(f"{relative}: revision must be a positive integer")
+    expected_app = path.parent.name
+    if manifest["app"] != expected_app or not APP_PATTERN.fullmatch(expected_app):
+        raise ManifestError(f"{relative}: app must match its parent directory")
+    updated_at = manifest["updated_at"]
+    if not isinstance(updated_at, str):
+        raise ManifestError(f"{relative}: updated_at must be an ISO-8601 string")
+    try:
+        parsed_updated_at = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ManifestError(f"{relative}: invalid updated_at: {updated_at}") from error
+    if parsed_updated_at.utcoffset() is None:
+        raise ManifestError(f"{relative}: updated_at must include a UTC offset")
+    devices = manifest["devices"]
+    if not isinstance(devices, dict):
+        raise ManifestError(f"{relative}: devices must be an object")
+    for code, expiry in devices.items():
+        if not CODE_PATTERN.fullmatch(code):
+            raise ManifestError(f"{relative}: invalid device code: {code}")
+        parse_date(expiry)
+    if list(devices) != sorted(devices):
+        raise ManifestError(f"{relative}: device codes must be sorted")
+
+
+def save(path, manifest):
+    manifest["revision"] += 1
+    manifest["updated_at"] = datetime.now(CHINA_TIME).isoformat(timespec="seconds")
+    manifest["devices"] = dict(sorted(manifest["devices"].items()))
+    validate(path, manifest)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w", encoding="utf-8", dir=path.parent, delete=False
+    ) as handle:
+        json.dump(manifest, handle, ensure_ascii=False, indent=2)
+        handle.write("\n")
+        temporary = Path(handle.name)
+    temporary.replace(path)
+
+
+def check(app=None):
+    paths = [manifest_path(app)] if app else sorted(APPS_DIR.glob("*/manifest-v1.json"))
+    if not paths:
+        raise ManifestError("no manifests found")
+    total = 0
+    for path in paths:
+        manifest = load(path)
+        validate(path, manifest)
+        count = len(manifest["devices"])
+        total += count
+        print(f"ok: {path.relative_to(ROOT)} ({count} entries, revision {manifest['revision']})")
+    print(f"validated {len(paths)} manifest(s), {total} total entries")
+
+
+def add(app, raw_code, expiry):
+    path = manifest_path(app)
+    manifest = load(path)
+    validate(path, manifest)
+    code = normalize_code(raw_code)
+    parse_date(expiry)
+    if code in manifest["devices"]:
+        current = manifest["devices"][code]
+        raise ManifestError(f"device already exists with expiry {current}; use update")
+    manifest["devices"][code] = expiry
+    save(path, manifest)
+    print(f"added device to {app}; revision is now {manifest['revision']}")
+
+
+def update(app, raw_code, expiry):
+    path = manifest_path(app)
+    manifest = load(path)
+    validate(path, manifest)
+    code = normalize_code(raw_code)
+    parse_date(expiry)
+    if code not in manifest["devices"]:
+        raise ManifestError("device does not exist; use add")
+    if manifest["devices"][code] == expiry:
+        raise ManifestError(f"device already has expiry {expiry}")
+    manifest["devices"][code] = expiry
+    save(path, manifest)
+    print(f"updated device in {app}; revision is now {manifest['revision']}")
+
+
+def remove(app, raw_code):
+    path = manifest_path(app)
+    manifest = load(path)
+    validate(path, manifest)
+    code = normalize_code(raw_code)
+    if code not in manifest["devices"]:
+        raise ManifestError("device does not exist")
+    del manifest["devices"][code]
+    save(path, manifest)
+    print(f"removed device from {app}; revision is now {manifest['revision']}")
+
+
+def initialize(app):
+    path = manifest_path(app)
+    if path.exists():
+        raise ManifestError(f"manifest already exists: {path.relative_to(ROOT)}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    manifest = {
+        "schema": 1,
+        "revision": 0,
+        "app": app,
+        "updated_at": datetime.now(CHINA_TIME).isoformat(timespec="seconds"),
+        "devices": {},
+    }
+    save(path, manifest)
+    print(f"created {path.relative_to(ROOT)}")
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+
+    init_parser = commands.add_parser("init", help="create an empty app manifest")
+    init_parser.add_argument("app")
+
+    add_parser = commands.add_parser("add", help="add a new device")
+    add_parser.add_argument("app")
+    add_parser.add_argument("code")
+    add_parser.add_argument("expiry")
+
+    update_parser = commands.add_parser("update", help="change an existing expiry")
+    update_parser.add_argument("app")
+    update_parser.add_argument("code")
+    update_parser.add_argument("expiry")
+
+    remove_parser = commands.add_parser("remove", help="remove an existing device")
+    remove_parser.add_argument("app")
+    remove_parser.add_argument("code")
+
+    check_parser = commands.add_parser("check", help="validate one or all manifests")
+    check_parser.add_argument("app", nargs="?")
+    return parser
+
+
+def main():
+    args = build_parser().parse_args()
+    if args.command == "init":
+        initialize(args.app)
+    elif args.command == "add":
+        add(args.app, args.code, args.expiry)
+    elif args.command == "update":
+        update(args.app, args.code, args.expiry)
+    elif args.command == "remove":
+        remove(args.app, args.code)
+    elif args.command == "check":
+        check(args.app)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ManifestError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        sys.exit(1)

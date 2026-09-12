@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_dir"
+
+./scripts/manage check
+
+if [ "$(git branch --show-current)" != "main" ]; then
+  echo "error: publish must run from the main branch" >&2
+  exit 1
+fi
+
+if [ -n "$(git status --porcelain)" ]; then
+  echo "error: commit all changes before publishing" >&2
+  exit 1
+fi
+
+for remote in github gitee; do
+  if ! git remote get-url "$remote" >/dev/null 2>&1; then
+    echo "error: missing git remote named $remote" >&2
+    exit 1
+  fi
+done
+
+git push github main
+git push gitee main
+
+github_sha=$(git ls-remote github refs/heads/main | awk '{print $1}')
+gitee_sha=$(git ls-remote gitee refs/heads/main | awk '{print $1}')
+local_sha=$(git rev-parse HEAD)
+
+if [ -z "$github_sha" ] || [ "$github_sha" != "$gitee_sha" ] || [ "$github_sha" != "$local_sha" ]; then
+  echo "error: local, github, and gitee main revisions do not match" >&2
+  exit 1
+fi
+
+echo "published main to github and gitee at $github_sha"
