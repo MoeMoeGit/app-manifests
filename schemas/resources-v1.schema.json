@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Application resources v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "revision", "payload"],
+  "properties": {
+    "version": {"const": 1},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "payload": {"type": "string", "minLength": 40, "maxLength": 32768, "contentEncoding": "base64"}
+  }
+}

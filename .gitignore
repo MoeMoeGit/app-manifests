@@ -2,3 +2,9 @@
 __pycache__/
 *.pyc
 /local-docs/
+
+/local-secrets/
+/local-tools/
+/.env
+/.env.*
+*.private.json

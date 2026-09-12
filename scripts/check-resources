@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Validate public resource envelopes and reject unintended tracked paths."""
+import argparse
+import base64
+import json
+import re
+import subprocess
+from pathlib import Path
+ROOT = Path(__file__).resolve().parent.parent
+
+def approved(path):
+    return path in {'.gitignore', 'README.md', 'scripts/manage', 'scripts/publish', 'scripts/check-resources', 'schemas/manifest-v1.schema.json', 'schemas/resources-v1.schema.json'} or bool(re.fullmatch(r'apps/[a-z0-9-]+/(manifest-v1|resources-v1)\.json', path))
+
+def validate(raw):
+    def unique(pairs):
+        result = {}
+        for name, value in pairs:
+            if name in result:
+                raise ValueError('duplicate field')
+            result[name] = value
+        return result
+    if len(raw) > 32768:
+        raise ValueError('resource too large')
+    doc = json.loads(raw, object_pairs_hook=unique)
+    if set(doc) != {'version', 'revision', 'payload'} or type(doc['version']) is not int or doc['version'] != 1 or type(doc['revision']) is not int or doc['revision'] < 1 or doc['revision'] > 9007199254740991:
+        raise ValueError('invalid envelope')
+    if len(base64.b64decode(doc['payload'], validate=True)) < 28:
+        raise ValueError('invalid payload')
+
+def git(*args):
+    return subprocess.check_output(['git', '-C', str(ROOT), *args])
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--published', action='store_true')
+    args = parser.parse_args()
+    staged = git('ls-files', '-z').decode().split('\0')
+    head = git('ls-tree', '-r', '--name-only', '-z', 'HEAD').decode().split('\0') if args.published else []
+    if any(path and not approved(path) for path in staged + head):
+        raise ValueError('unexpected tracked path; review locally before publishing')
+    for path in ROOT.glob('apps/*/resources-v1.json'):
+        validate(path.read_bytes())
+    for path in staged:
+        if path.endswith('/resources-v1.json'):
+            validate(git('show', ':' + path))
+    for path in head:
+        if path.endswith('/resources-v1.json'):
+            validate(git('show', 'HEAD:' + path))
+    print('public resources and tracked paths: valid')
+
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception:
+        raise SystemExit('Public resource validation failed. Review the local diff and tracked paths; no contents displayed.')

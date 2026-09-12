@@ -5,6 +5,7 @@ repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_dir"
 
 ./scripts/manage check
+./scripts/check-resources --published
 
 if [ "$(git branch --show-current)" != "main" ]; then
   echo "error: publish must run from the main branch" >&2

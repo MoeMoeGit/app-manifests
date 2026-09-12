@@ -36,3 +36,7 @@ git commit -m "data: update cckit manifest"
 `scripts/publish` expects remotes named `github` and `gitee`. It validates all
 manifests, pushes the same `main` commit to both hosts, and verifies that both
 remote branches point at the same commit.
+
+## Application resources
+
+Optional application resource data lives at `apps/<app-id>/resources-v1.json`. The public envelope schema is `schemas/resources-v1.schema.json`. Run `./scripts/check-resources` before committing. Publishing also checks tracked paths and the committed envelopes.
