@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Application update manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "revision", "app", "version", "published_at", "release_url"],
+  "properties": {
+    "schema": {"const": 1},
+    "revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "app": {"type": "string", "pattern": "^[a-z0-9-]+$"},
+    "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "release_url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/[^/]+/[^/]+/releases/tag/v[0-9]+\\.[0-9]+\\.[0-9]+$"}
+  }
+}
