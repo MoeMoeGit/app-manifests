@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 def approved(path):
-    return path in {'.gitignore', 'README.md', 'scripts/manage', 'scripts/publish', 'scripts/check-resources', 'schemas/manifest-v1.schema.json', 'schemas/resources-v1.schema.json'} or bool(re.fullmatch(r'apps/[a-z0-9-]+/(manifest-v1|resources-v1)\.json', path))
+    return path in {'.gitignore', 'README.md', 'scripts/manage', 'scripts/publish', 'scripts/check-resources', 'schemas/manifest-v1.schema.json', 'schemas/resources-v1.schema.json', 'apps/harvest/sync-v1/README.md'} or bool(re.fullmatch(r'apps/[a-z0-9-]+/(manifest-v1|resources-v1)\.json', path)) or bool(re.fullmatch(r'apps/harvest/sync-v1/devices/[0-9a-f-]{36}/[0-9]{12}\.json', path))
 
 def validate(raw):
     def unique(pairs):
@@ -27,6 +27,25 @@ def validate(raw):
     if len(base64.b64decode(doc['payload'], validate=True)) < 28:
         raise ValueError('invalid payload')
 
+def validate_harvest(path, raw):
+    if len(raw) > 64 * 1024 * 1024:
+        raise ValueError('harvest sync pack too large')
+    doc = json.loads(raw)
+    expected = {'version', 'device', 'sequence', 'occurred_at', 'kdf', 'salt', 'nonce', 'ciphertext', 'auth_tag'}
+    if set(doc) != expected or doc['version'] != 1 or type(doc['sequence']) is not int or doc['sequence'] < 1 or type(doc['occurred_at']) is not int or doc['occurred_at'] < 0:
+        raise ValueError('invalid harvest sync envelope')
+    kdf = doc['kdf']
+    if kdf != {'name': 'argon2id', 'memory': 65536, 'passes': 3, 'parallelism': 1, 'tagLength': 32}:
+        raise ValueError('invalid harvest sync kdf')
+    if not re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}', doc['device']):
+        raise ValueError('invalid harvest device id')
+    parts = path.split('/')
+    if parts[-2] != doc['device'] or int(parts[-1][:-5]) != doc['sequence']:
+        raise ValueError('harvest sync path mismatch')
+    decoded = {name: base64.b64decode(doc[name], validate=True) for name in ('salt', 'nonce', 'ciphertext', 'auth_tag')}
+    if len(decoded['salt']) != 16 or len(decoded['nonce']) != 12 or len(decoded['auth_tag']) != 16 or not decoded['ciphertext']:
+        raise ValueError('invalid harvest encrypted fields')
+
 def git(*args):
     return subprocess.check_output(['git', '-C', str(ROOT), *args])
 
@@ -40,12 +59,18 @@ def main():
         raise ValueError('unexpected tracked path; review locally before publishing')
     for path in ROOT.glob('apps/*/resources-v1.json'):
         validate(path.read_bytes())
+    for path in ROOT.glob('apps/harvest/sync-v1/devices/*/*.json'):
+        validate_harvest(path.relative_to(ROOT).as_posix(), path.read_bytes())
     for path in staged:
         if path.endswith('/resources-v1.json'):
             validate(git('show', ':' + path))
+        if re.fullmatch(r'apps/harvest/sync-v1/devices/[0-9a-f-]{36}/[0-9]{12}\.json', path):
+            validate_harvest(path, git('show', ':' + path))
     for path in head:
         if path.endswith('/resources-v1.json'):
             validate(git('show', 'HEAD:' + path))
+        if re.fullmatch(r'apps/harvest/sync-v1/devices/[0-9a-f-]{36}/[0-9]{12}\.json', path):
+            validate_harvest(path, git('show', 'HEAD:' + path))
     print('public resources and tracked paths: valid')
 
 if __name__ == '__main__':
